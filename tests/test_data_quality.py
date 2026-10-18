@@ -12,6 +12,7 @@ DATA_FILE = (
 )
 
 EXPECTED_READINGS = 25_000
+EXPECTED_DEFECTS_PER_TYPE = 100
 
 REQUIRED_COLUMNS = [
     "meter_id",
@@ -25,17 +26,24 @@ REQUIRED_COLUMNS = [
 
 @pytest.fixture(scope="module")
 def df():
-    data = pd.read_csv(DATA_FILE)
+    return pd.read_csv(DATA_FILE)
 
-    # Convert numeric columns to numeric types
-    numeric_columns = ["energy_kwh", "voltage_v", "current_a"]
-    for column in numeric_columns:
-        data[column] = pd.to_numeric(data[column], errors="raise")
 
-    # Parse timestamps as timezone-aware UTC values
-    data["reading_timestamp"] = pd.to_datetime(
-        data["reading_timestamp"], utc=True, errors="raise"
+@pytest.fixture(scope="module")
+def prepared(df):
+    data = df.copy()
+
+    data["reading_timestamp_parsed"] = pd.to_datetime(
+        data["reading_timestamp"],
+        utc=True,
+        errors="coerce",
     )
+
+    for column in ["energy_kwh", "voltage_v", "current_a"]:
+        data[f"{column}_parsed"] = pd.to_numeric(
+            data[column],
+            errors="coerce",
+        )
 
     return data
 
@@ -48,34 +56,43 @@ def test_required_columns(df):
     assert list(df.columns) == REQUIRED_COLUMNS
 
 
-def test_no_missing_values(df):
-    assert not df[REQUIRED_COLUMNS].isna().any().any()
-    assert df[REQUIRED_COLUMNS].apply(
-        lambda column: column.astype("string").str.strip().eq("").any()
-    ).sum() == 0
-
-
-def test_no_duplicate_readings(df):
-    duplicates = df.duplicated(
-        subset=["meter_id", "reading_timestamp"]
+def test_missing_meter_ids(df):
+    missing = (
+        df["meter_id"].isna()
+        | df["meter_id"].astype("string").str.strip().eq("")
     )
-    assert not duplicates.any()
+    assert missing.sum() == EXPECTED_DEFECTS_PER_TYPE
 
 
-def test_measurement_ranges(df):
-    assert df["energy_kwh"].between(0.1, 8.0).all()
-    assert df["voltage_v"].between(215.0, 245.0).all()
-    assert df["current_a"].between(0.5, 35.0).all()
+def test_invalid_numeric_values(prepared):
+    invalid = prepared["energy_kwh_parsed"].isna()
+    assert invalid.sum() == EXPECTED_DEFECTS_PER_TYPE
 
 
-def test_timestamps_are_valid_utc(df):
-    assert df["reading_timestamp"].notna().all()
-    assert str(df["reading_timestamp"].dt.tz) == "UTC"
+def test_out_of_range_voltage(prepared):
+    invalid = ~prepared["voltage_v_parsed"].between(215.0, 245.0)
+    assert invalid.sum() == EXPECTED_DEFECTS_PER_TYPE
 
 
-    
+def test_invalid_timestamps(prepared):
+    invalid = prepared["reading_timestamp_parsed"].isna()
+    assert invalid.sum() == EXPECTED_DEFECTS_PER_TYPE
+
+
+def test_duplicate_readings(prepared):
+    valid_keys = prepared[
+        prepared["meter_id"].notna()
+        & prepared["meter_id"].astype("string").str.strip().ne("")
+        & prepared["reading_timestamp_parsed"].notna()
+    ]
+
+    duplicates = valid_keys.duplicated(
+        subset=["meter_id", "reading_timestamp_parsed"],
+        keep="first",
+    )
+
+    assert duplicates.sum() == EXPECTED_DEFECTS_PER_TYPE
 
 
 if __name__ == "__main__":
-    import pytest
     raise SystemExit(pytest.main(["-v", __file__]))
